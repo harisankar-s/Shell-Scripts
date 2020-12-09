@@ -1,0 +1,201 @@
+#!/bin/bash
+
+if [ -f /home/cmsuser/Scripts/.monitorCMGNScheduling.RUNNING ]
+then
+	exit 0
+fi
+
+echo "STARTING" > /home/cmsuser/Scripts/.monitorCMGNScheduling.RUNNING
+
+if (($(echo $(date '+%m' | sed 's/^0//g') % 4 | bc) == 0))
+then
+	tableName1=SUB_CDR_$(date '+%d')_00_12_04
+	tableName2=SUB_CDR_$(date '+%d')_12_23_04
+else
+	tableName1=SUB_CDR_$(date '+%d')_00_12_0$(echo $(date '+%m' | sed 's/^0//g') % 4 | bc)
+	tableName2=SUB_CDR_$(date '+%d')_12_23_0$(echo $(date '+%m' | sed 's/^0//g') % 4 | bc)
+fi
+
+echo tableName1 :: $tableName1 tableName2 :: $tableName2
+
+conString="mysql -uroot -proot -h127.0.0.1 -P3306 CMS --table -Ae "
+#conString="mysql -uroot -proot -h10.3.60.14 -P3306 CMS --table -Ae "
+ignoreString="Using a password on the command line interface can be insecure."
+taskProfileSnapShotQuery="SELECT UD.USERNAME, TP.SCHEDULE_TIME, TP.TASK_ID, TP.START_TIME, TP.END_TIME, CPC.RESERVE_MSG_COUNT TOTAL_COUNT, TP.STATUS, SD.DESCRIPTION, TP.CREATE_DATE FROM CMS.TASK_PROFILE TP, CMS.LOGIN_MASTER UD, CMS.STATUS_DETAILS SD, CAMPAIGN_PROCESSOR_CDR CPC WHERE DATE_FORMAT(TP.SCHEDULE_TIME, '%d-%m-%Y') = DATE_FORMAT(NOW(), '%d-%m-%Y') AND CPC.TASK_ID = TP.TASK_ID AND UD.USER_ID = TP.CREATED_BY AND SD.STATUS_ID = TP.STATUS ORDER BY TP.SCHEDULE_TIME DESC;"
+taskProfileSnapShotTomorrowQuery="SELECT UD.USERNAME, TP.SCHEDULE_TIME, TP.TASK_ID, TP.START_TIME, TP.END_TIME, CPC.RESERVE_MSG_COUNT TOTAL_COUNT, TP.STATUS, SD.DESCRIPTION, TP.CREATE_DATE FROM CMS.TASK_PROFILE TP, CMS.LOGIN_MASTER UD, CMS.STATUS_DETAILS SD, CAMPAIGN_PROCESSOR_CDR CPC WHERE DATE_FORMAT(TP.SCHEDULE_TIME, '%d-%m-%Y') = DATE_FORMAT(DATE_ADD(NOW(), INTERVAL 1 DAY), '%d-%m-%Y') AND CPC.TASK_ID = TP.TASK_ID AND UD.USER_ID = TP.CREATED_BY AND SD.STATUS_ID = TP.STATUS ORDER BY TP.SCHEDULE_TIME DESC;"
+campgnSchedulingStatusQuery="SELECT UD.USERNAME, TP.CREATED_BY, TP.CREATE_DATE, TP.SCHEDULE_TIME, TP.TASK_ID, TP.STATUS, SD.DESCRIPTION FROM CMS.TASK_PROFILE TP, CMS.LOGIN_MASTER UD, CMS.STATUS_DETAILS SD WHERE STATUS NOT IN (2, 5, 7, 48, 74, 89, 91) AND DATE_ADD(TP.CREATE_DATE, INTERVAL 5 MINUTE) > NOW() AND DATE_ADD(TP.SCHEDULE_TIME, INTERVAL 20 MINUTE) > NOW() AND UD.USER_ID = TP.CREATED_BY AND SD.STATUS_ID = TP.STATUS;"
+campgnSchedulingStatusQuery="SELECT UD.USERNAME, TP.CREATED_BY, TP.CREATE_DATE, TP.SCHEDULE_TIME, TP.TASK_ID, TP.STATUS, SD.DESCRIPTION FROM CMS.TASK_PROFILE TP, CMS.LOGIN_MASTER UD, CMS.STATUS_DETAILS SD WHERE TP.STATUS NOT IN (2, 5, 7, 48, 74, 89, 91) AND TIMESTAMPDIFF(MINUTE,TP.CREATE_DATE,NOW()) > 5 AND TIMESTAMPDIFF(MINUTE,TP.CREATE_DATE,NOW()) < 10 AND UD.USER_ID = TP.CREATED_BY AND TP.CREATED_BY NOT IN (9820) AND SD.STATUS_ID = TP.STATUS;"
+campignSUBMITStatusQuery="SELECT UPPER(SSCI.DESCRIPTION) STATUS, COUNT(CDR.STATUS_CODE) COUNT FROM (SELECT STATUS_CODE FROM CMS_CDR.${tableName1} UNION ALL SELECT STATUS_CODE FROM CMS_CDR.${tableName2}) CDR LEFT OUTER JOIN SUBMIT_STATUS_CODE_INFO SSCI ON SSCI.STATUS_CODE=CDR.STATUS_CODE GROUP BY SSCI.STATUS_CODE;;"
+campgnSchedulingNotPickForDeliveryQuery="SELECT UD.USERNAME, TP.SCHEDULE_TIME, TP.TASK_ID, TP.STATUS, TTM.STATUS FROM CMS.TASK_PROFILE TP, CMS.TASK_TABLE_MAPPING TTM, CMS.LOGIN_MASTER UD, CMS.USER_LOCATION UL, CMS.LOCATION_MASTER LM WHERE DATE(TP.SCHEDULE_TIME) = DATE(NOW()) AND TP.CHANNEL_TYPE_ID NOT IN (3) AND TP.STATUS IN (2, 32, 46) AND TP.ONLINE_VALUE = 0 AND TP.SCHEDULE_TIME < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 8 MINUTE) AND TTM.TASK_ID = TP.TASK_ID AND TTM.STATUS <> 'C' AND UD.USER_ID = TP.CREATED_BY AND UL.USER_ID = UD.USER_ID AND LM.LOCATION_ID = UL.LOCATION_ID AND LM.LOCATION_ID NOT IN (45, 43) ORDER BY TP.SCHEDULE_TIME;"
+campgnDeliveryNotCompletedQuery="SELECT UD.USERNAME, TP.SCHEDULE_TIME, TP.TASK_ID, TP.START_TIME, TP.END_TIME, CPC.RESERVE_MSG_COUNT TOTAL_COUNT, TP.STATUS, TTM.STATUS TASK_STATUS, SD.DESCRIPTION, TP.CREATE_DATE FROM CMS.TASK_PROFILE TP, CMS.TASK_TABLE_MAPPING TTM, CMS.LOGIN_MASTER UD, CAMPAIGN_PROCESSOR_CDR CPC, CMS.STATUS_DETAILS SD WHERE DATE(TP.SCHEDULE_TIME) = DATE(NOW()) AND TP.ONLINE_VALUE = 0 AND TP.START_TIME < DATE_SUB(NOW(), INTERVAL 2 HOUR) AND TP.CHANNEL_TYPE_ID NOT IN (3) AND TP.STATUS IN (2, 5) AND TP.ISPAUSE = 0 AND CPC.TASK_ID = TP.TASK_ID AND TTM.TASK_ID = TP.TASK_ID AND TTM.STATUS IN ('P', 'E') AND UD.USER_ID = TP.CREATED_BY AND SD.STATUS_ID = TP.STATUS GROUP BY TP.TASK_ID ORDER BY TP.SCHEDULE_TIME;"
+campgnDeliveryNotCompletedQuery="SELECT CONCAT(UD.USERNAME, ' (', TP.CREATED_BY, ')') SCHEDULED_NAME, CONCAT(LM.LOCATION_NAME, ' (', LM.LOCATION_ID, ')') CIRCLE, TP.SCHEDULE_TIME, TP.TASK_ID, TP.START_TIME, TP.END_TIME, CPC.RESERVE_MSG_COUNT TOTAL_COUNT, CONCAT(SD.DESCRIPTION,' (',TP.STATUS, ')') STATUS, TTM.STATUS TASK_STATUS, AT.DESCRIPTION ACCOUNT_TYPE, TP.CREATE_DATE FROM CMS.TASK_PROFILE TP, CMS.TASK_TABLE_MAPPING TTM, CMS.LOGIN_MASTER UD, CAMPAIGN_PROCESSOR_CDR CPC, CMS.STATUS_DETAILS SD, CMS.USER_LOCATION UL, CMS.LOCATION_MASTER LM, ACCOUNT_TYPE_MAP AT WHERE DATE(TP.SCHEDULE_TIME) = DATE(NOW()) AND TP.ONLINE_VALUE = 0 AND TP.START_TIME < DATE_SUB(NOW(), INTERVAL 2 HOUR) AND TP.CHANNEL_TYPE_ID NOT IN (3) AND TP.STATUS IN (2, 5) AND CPC.TASK_ID = TP.TASK_ID AND TTM.TASK_ID = TP.TASK_ID AND TTM.STATUS IN ('P', 'E') AND UD.USER_ID = TP.CREATED_BY AND SD.STATUS_ID = TP.STATUS AND UL.USER_ID = UD.USER_ID AND LM.LOCATION_ID = UL.LOCATION_ID AND AT.ACCOUNT_TYPE = LM.ACCOUNT_TYPE AND TP.CREATED_BY != 9872 AND LM.LOCATION_ID NOT IN (45, 43) GROUP BY TP.TASK_ID ORDER BY TP.SCHEDULE_TIME;"
+###campgnDeliveryNotCompletedQuery="SELECT CONCAT(UD.USERNAME, ' (', TP.CREATED_BY, ')') SCHEDULED_NAME, CONCAT(LM.LOCATION_NAME, ' (', LM.LOCATION_ID, ')') CIRCLE, TP.SCHEDULE_TIME, TP.TASK_ID, TP.START_TIME, TP.END_TIME, CPC.RESERVE_MSG_COUNT TOTAL_COUNT, CONCAT(SD.DESCRIPTION,' (',TP.STATUS, ')') STATUS, TTM.STATUS TASK_STATUS, AT.DESCRIPTION ACCOUNT_TYPE, TP.CREATE_DATE FROM CMS.TASK_PROFILE TP, CMS.TASK_TABLE_MAPPING TTM, CMS.LOGIN_MASTER UD, CAMPAIGN_PROCESSOR_CDR CPC, CMS.STATUS_DETAILS SD, CMS.USER_LOCATION UL, CMS.LOCATION_MASTER LM, ACCOUNT_TYPE_MAP AT WHERE DATE(TP.SCHEDULE_TIME) = DATE(NOW()) AND TP.ONLINE_VALUE = 0 AND TP.START_TIME < DATE_SUB(NOW(), INTERVAL 1 HOUR) AND TP.CHANNEL_TYPE_ID NOT IN (3) AND TP.STATUS IN (2, 5) AND CPC.TASK_ID = TP.TASK_ID AND TTM.TASK_ID = TP.TASK_ID AND TTM.STATUS IN ('P', 'E') AND UD.USER_ID = TP.CREATED_BY AND SD.STATUS_ID = TP.STATUS AND UL.USER_ID = UD.USER_ID AND LM.LOCATION_ID = UL.LOCATION_ID AND AT.ACCOUNT_TYPE = LM.ACCOUNT_TYPE GROUP BY TP.TASK_ID ORDER BY TP.SCHEDULE_TIME;"
+
+onlineTaskListGoingToExiperySQLQuery="SELECT TP.CREATE_DATE CREATE_DATE, TP.TASK_ID TASK_ID, SC.DESCRIPTION TASK_NAME, TP.STATUS TASK_STATUS, UD.USER_NAME CREATED_USERNAME, TP.END_DATE TASK_ENDDATE, DATEDIFF(DATE(TP.END_DATE), DATE(NOW())) NO_OF_DAYS_FOR_EXPIRY FROM TASK_PROFILE TP, CMS.LOGIN_MASTER UD, SCHEDULE_MASTER SC WHERE TP.ONLINE_VALUE > 0 AND TP.STATUS NOT IN (125,7) AND DATEDIFF(DATE(END_DATE), DATE(NOW())) < 5 AND TP.SCHEDULE_ID = SC.SCHEDULE_ID AND TP.CREATED_BY = UD.USER_ID;"
+quotaExpiryForHTTPUserQuery="SELECT CONCAT(LM.USERNAME, '(', BNR.USER_ID, ')') USERNAME, CONCAT(PD.DESCRIPTION, '(', BNR.PLAN_ID, ')') PACKAGENAME, BNR.THRESHOLD_PERC THRESHOLD FROM BW_ONM_NOTIFICATION_REPO BNR, LOGIN_MASTER LM, USER_DETAILS UD, PLAN_DETAILS PD WHERE DATE(BNR.CREATE_DATE) = DATE(DATE_SUB(NOW(), INTERVAL 0 DAY)) AND BNR.SENT_FLAG = 1 AND BNR.THRESHOLD_PERC > 89 AND BNR.USER_ID = LM.USER_ID AND BNR.USER_ID = UD.USER_ID AND BNR.PLAN_ID = PD.PLAN_ID AND UD.HTTP_USER = 1 AND LM.STATUS = 'T';"
+
+<<COMMENT1
+find /home/cmsuser/Scripts/ -type f -name '.taskProfileSnapShot.SEND' -mmin +58 -exec rm -f {} \;
+if [ ! -f /home/cmsuser/Scripts/.taskProfileSnapShot.SEND ]
+then
+	${conString} "${taskProfileSnapShotQuery}" | grep -v "${ignoreString}" | grep -v +- > /home/cmsuser/Scripts/.taskProfileSnapShot 
+	if [ -f /home/cmsuser/Scripts/.taskProfileSnapShot ] && [ -s /home/cmsuser/Scripts/.taskProfileSnapShot ]
+	then
+		echo "AIRTEL DIGIMATE TASK SCHEDULING STATUS REPORT $(date '+%d-%m-%Y %H')" > /home/cmsuser/.ONM_STATUS/TASK_PROFILE_SNAP_SHOT.REPORT
+		cat /home/cmsuser/Scripts/.taskProfileSnapShot >> /home/cmsuser/.ONM_STATUS/TASK_PROFILE_SNAP_SHOT.REPORT
+		echo "[TO:adarsh.rs@6dtech.co.in]" >> /home/cmsuser/.ONM_STATUS/TASK_PROFILE_SNAP_SHOT.REPORT
+		echo "SENDING :: TASK_PROFILE_SNAP_SHOT.REPORT " > /home/cmsuser/Scripts/.taskProfileSnapShot.SEND
+	fi
+else
+	ls -lrth /home/cmsuser/Scripts/.taskProfileSnapShot.SEND
+fi
+COMMENT1
+
+echo "CAMPGN_SCHEDULING_STATUS_QUERY :: ${campgnSchedulingStatusQuery}"
+${conString} "${campgnSchedulingStatusQuery}" | grep -v "${ignoreString}" | grep -v USERNAME | grep -v +- > /home/cmsuser/Scripts/.campgnSchedulingStatus
+if [ -f /home/cmsuser/Scripts/.campgnSchedulingStatus ] && [ -s /home/cmsuser/Scripts/.campgnSchedulingStatus ]
+then
+	awk -F'|' '{print "User "$2" Facing Issue with Campaign Schedule as "$8" [ TASK_ID :: "$6 " SCHEDULE_TIME :: "$5"]"}' /home/cmsuser/Scripts/.campgnSchedulingStatus | grep -v FULLNAME > /home/cmsuser/Scripts/.campgnSchedulingStatus.mail
+	echo "Aitel Digiate Campaign Schedule Issue." > /home/cmsuser/.ONM_STATUS/CAMPAIGN_SCHEDULE_ISSUE.GENERIC
+	cat /home/cmsuser/Scripts/.campgnSchedulingStatus.mail >> /home/cmsuser/.ONM_STATUS/CAMPAIGN_SCHEDULE_ISSUE.GENERIC
+	echo "[TO:adarsh.rs@6dtech.co.in]" >> /home/cmsuser/.ONM_STATUS/CAMPAIGN_SCHEDULE_ISSUE.GENERIC
+else
+	rm -f /home/cmsuser/Scripts/.campgnSchedulingStatus
+fi
+
+echo "CAMPGN_SCHEDULING_NOT_PICK_FOR_DELIVERY :: ${campgnSchedulingNotPickForDeliveryQuery}"
+${conString} "${campgnSchedulingNotPickForDeliveryQuery}" | grep -v "${ignoreString}" | grep -v +- > /home/cmsuser/Scripts/.campgnSchedulingNotPickForDelivery
+if [ -f /home/cmsuser/Scripts/.campgnSchedulingNotPickForDelivery ] && [ -s /home/cmsuser/Scripts/.campgnSchedulingNotPickForDelivery ]
+then
+	#|UD.FULLNAME|TP.SCHEDULE_TIME|TP.TASK_ID|TP.STATUS|TTM.STATUS|
+        awk -F'|' 'NR>1{print "Offline Task with Task-Id "$4" Scheduled from the User "$2" having the Campaign Schedule Time "$3" Not Pick for Delivery"}' /home/cmsuser/Scripts/.campgnSchedulingNotPickForDelivery | grep -v TASK_ID > /home/cmsuser/Scripts/.campgnSchedulingNotPickForDelivery.mail
+        echo "Aitel Digiate :: Offline Task not Picking by Delivery." > /home/cmsuser/.ONM_STATUS/CAMPAIGN_OFFLINENOTPICKDLVR_ISSUE.GENERIC
+        cat /home/cmsuser/Scripts/.campgnSchedulingNotPickForDelivery.mail >> /home/cmsuser/.ONM_STATUS/CAMPAIGN_OFFLINENOTPICKDLVR_ISSUE.GENERIC
+        echo "[TO:adarsh.rs@6dtech.co.in]" >> /home/cmsuser/.ONM_STATUS/CAMPAIGN_OFFLINENOTPICKDLVR_ISSUE.GENERIC
+else
+        rm -f /home/cmsuser/Scripts/.campgnSchedulingNotPickForDelivery
+fi
+
+#find /home/cmsuser/Scripts/ -type f -name '.campignSUBMITStatusDetails.SEND' -mmin +58 -exec rm -f {} \;
+#if [ ! -f /home/cmsuser/Scripts/.campignSUBMITStatusDetails.SEND ]
+#then
+#	echo ${campignSUBMITStatusQuery}
+#        ${conString} "${campignSUBMITStatusQuery}" | grep -v "${ignoreString}" | grep -v +- > /home/cmsuser/Scripts/.campignSUBMITStatusDetails 
+#        if [ -f /home/cmsuser/Scripts/.campignSUBMITStatusDetails ] && [ -s /home/cmsuser/Scripts/.campignSUBMITStatusDetails ]
+#        then
+#                echo "AIRTEL DIGIMATE CAMPAIGN SUBMIT STATUS $(date '+%d-%m-%Y %H')" > /home/cmsuser/.ONM_STATUS/CAMPAIGN_SUBMIT_STATUS.REPORT
+#                cat /home/cmsuser/Scripts/.campignSUBMITStatusDetails >> /home/cmsuser/.ONM_STATUS/CAMPAIGN_SUBMIT_STATUS.REPORT
+##                echo "[TO:adarsh.rs@6dtech.co.in]" >> /home/cmsuser/.ONM_STATUS/CAMPAIGN_SUBMIT_STATUS.REPORT
+#                echo "SENDING :: CAMPAIGN_SUBMIT_STATUS.REPORT " > /home/cmsuser/Scripts/.campignSUBMITStatusDetails.SEND
+#        fi
+#else
+#        ls -lrth /home/cmsuser/Scripts/.campignSUBMITStatusDetails.SEND
+#fi
+<<COMMENT2
+if [[ $(date '+%H%M') -eq 2130 ]] || [[ $(date '+%H%M') -eq 1930 ]]
+then
+	find /home/cmsuser/Scripts/ -type f -name '.taskProfileSnapShotTomorrow.SEND' -mmin +59 -exec rm -f {} \;
+	if [ ! -f /home/cmsuser/Scripts/.taskProfileSnapShotTomorrow.SEND ]
+	then
+		echo ${taskProfileSnapShotTomorrowQuery}
+		${conString} "${taskProfileSnapShotTomorrowQuery}" | grep -v "${ignoreString}" | grep -v +- > /home/cmsuser/Scripts/.taskProfileSnapShotTomorrow
+		if [ -f /home/cmsuser/Scripts/.taskProfileSnapShotTomorrow ] && [ -s /home/cmsuser/Scripts/.taskProfileSnapShotTomorrow ]
+		then
+			echo "AIRTEL DIGIMATE TOMORROW'S TASK SCHEDULES $(date --date='tomorrow' '+%d-%m-%Y')" > /home/cmsuser/.ONM_STATUS/TOMORROW_TASK_PROFILE_SNAP_SHOT.REPORT
+			cat /home/cmsuser/Scripts/.taskProfileSnapShotTomorrow >> /home/cmsuser/.ONM_STATUS/TOMORROW_TASK_PROFILE_SNAP_SHOT.REPORT
+			echo "[TO:adarsh.rs@6dtech.co.in]" >> /home/cmsuser/.ONM_STATUS/TOMORROW_TASK_PROFILE_SNAP_SHOT.REPORT
+			echo "SENDING : TOMORROW_TASK_PROFILE_SNAP_SHOT.REPORT" > /home/cmsuser/Scripts/.taskProfileSnapShotTomorrow.SEND
+		fi
+	else
+		ls -lrth /home/cmsuser/Scripts/.taskProfileSnapShotTomorrow.SEND
+	fi
+fi
+COMMENT2
+
+
+find /home/cmsuser/Scripts/ -type f -name '.TMDPendingStatus.SEND'  -exec rm -f {} \;
+connectionString="mysql -ucmsuser -pcmsuser -h10.3.60.15 -P3306 CMS_TMD -Ae "
+ignoreString="Using a password on the command line interface can be insecure."
+
+if [ ! -f /home/cmsuser/Scripts/.TMDPendingStatus.SEND ]
+then
+        echo "PENDING TASK LIST FOR ONLINE TASK." > /home/cmsuser/Scripts/.TMDPendingStatus.SEND
+        tmdTbaleList=$($connectionString "SELECT DISTINCT TABLE_NAME FROM CMS.TASK_TABLE_MAPPING WHERE  TASK_ID IN (SELECT TASK_ID FROM CMS.TASK_PROFILE WHERE ONLINE_VALUE > 0 AND CHANNEL_TYPE_ID NOT IN (3)) AND DATE(CREATE_DATE) = DATE(NOW()) AND CREATE_DATE > DATE_SUB(NOW(), INTERVAL 30 MINUTE) AND CREATE_DATE < DATE_SUB(NOW(), INTERVAL 5 MINUTE);" | grep -v +- | grep -v TABLE_NAME | grep -v "${ignoreString}") 
+	tmdTbaleList=$($connectionString "SELECT DISTINCT TABLE_NAME FROM CMS.TASK_TABLE_MAPPING WHERE  TASK_ID IN (SELECT TASK_ID FROM CMS.TASK_PROFILE WHERE ONLINE_VALUE > 0) AND CREATE_DATE < DATE_SUB(NOW(), INTERVAL 5 MINUTE) AND DATE(CREATE_DATE) = DATE(NOW());" | grep -v +- | grep -v TABLE_NAME | grep -v "${ignoreString}") 
+        for tmdTableName in ${tmdTbaleList}
+        do
+                selectQuery="SELECT COUNT(*) COUNT FROM ${tmdTableName} WHERE STATUS = '9' AND CREATE_DATE < DATE_SUB(NOW(), INTERVAL 5 MINUTE);"
+                count=$(${connectionString} "${selectQuery}" | grep -v "${ignoreString}" | grep -v +- | grep -v COUNT)
+                if ((${#count} == 0))
+                then
+                        count=0
+                fi
+                if ((${count} >0))
+                then
+                        echo ${tmdTableName} - ${count}
+                        echo "ONLINE TMD - ${tmdTableName} TASK not picked for Delivery, Pending for Delivery count ${count}" >> /home/cmsuser/Scripts/.OLTASKNOT_DELIVERED
+                fi
+        done
+else
+        ls -lrth /home/cmsuser/Scripts/.TMDPendingStatus.SEND
+fi
+
+if [ -f /home/cmsuser/Scripts/.OLTASKNOT_DELIVERED ]
+then
+        echo "AIRTEL DIGIMATE :: ONLINE TASKS NOT DELIVERING." > /home/cmsuser/.ONM_STATUS/ONLINE_TASK_NOT_PICKING.GENERIC
+        cat /home/cmsuser/Scripts/.OLTASKNOT_DELIVERED >> /home/cmsuser/.ONM_STATUS/ONLINE_TASK_NOT_PICKING.GENERIC
+        #echo "[TO:adarsh.rs@6dtech.co.in]" >> /home/cmsuser/.ONM_STATUS/ONLINE_TASK_NOT_PICKING.GENERIC
+        rm -f /home/cmsuser/Scripts/.OLTASKNOT_DELIVERED
+fi
+
+find /home/cmsuser/Scripts/ -maxdepth 1 -mmin +55 -name '.campgnSchedulingNotCompletedDelivery.LOCK' -exec rm -f {} \;
+if [ ! -f /home/cmsuser/Scripts/.campgnSchedulingNotCompletedDelivery.LOCK ]
+then
+	touch /home/cmsuser/Scripts/.campgnSchedulingNotCompletedDelivery.LOCK
+	echo "CAMPGN_DELIVERY_NOT_COMPLETED_QUERY :: ${campgnDeliveryNotCompletedQuery}"
+	${conString} "${campgnDeliveryNotCompletedQuery}" | grep -v "${ignoreString}" | grep -v +- > /home/cmsuser/Scripts/.campgnSchedulingNotCompletedDelivery
+	if [ -f /home/cmsuser/Scripts/.campgnSchedulingNotCompletedDelivery ] && [ -s /home/cmsuser/Scripts/.campgnSchedulingNotCompletedDelivery ]
+	then
+		totalSchedule=$(awk -F'|' 'NR>1 {sum+=$8} END {print sum}' /home/cmsuser/Scripts/.campgnSchedulingNotCompletedDelivery)
+		echo ___________________________________________${totalSchedule}___________________________________________________
+        	echo "Aitel Digiate :: Offline Task Delivery not Completed." > /home/cmsuser/.ONM_STATUS/CAMPAIGN_OFFLINE_DELIVERY_NOT_ABLE_TO_COMPLETED.REPORT
+	        cat /home/cmsuser/Scripts/.campgnSchedulingNotCompletedDelivery >> /home/cmsuser/.ONM_STATUS/CAMPAIGN_OFFLINE_DELIVERY_NOT_ABLE_TO_COMPLETED.REPORT
+        	echo "[TO:adarsh.rs@6dtech.co.in]" >> /home/cmsuser/.ONM_STATUS/CAMPAIGN_OFFLINE_DELIVERY_NOT_ABLE_TO_COMPLETED.REPORT
+		rm -f /home/cmsuser/Scripts/.campgnSchedulingNotCompletedDelivery
+	else
+        	rm -f /home/cmsuser/Scripts/.campgnSchedulingNotCompletedDelivery
+	fi
+else
+	echo "CAMPGN_DELIVERY_NOT_COMPLETED_QUERY :: ALREADY IN CACHE"
+fi
+
+find /home/cmsuser/Scripts/ -maxdepth 1 -mindepth 1 -type f -name '.onlineTaskListGoingToExipery.SEND' -mtime +1 -exec rm -f {} \;
+if [ ! -f /home/cmsuser/Scripts/.onlineTaskListGoingToExipery.SEND ]
+then
+	touch /home/cmsuser/Scripts/.onlineTaskListGoingToExipery.SEND
+	echo "ONLINE_TASKLIST_GOINGTO_EXIPERY :: ${onlineTaskListGoingToExiperySQLQuery}"
+	${conString} "${onlineTaskListGoingToExiperySQLQuery}" | grep -v "${ignoreString}" | grep -v +- > /home/cmsuser/Scripts/.onlineTaskListGoingToExipery_TaskDetails
+	if [ -f /home/cmsuser/Scripts/.onlineTaskListGoingToExipery_TaskDetails ] && [ -s /home/cmsuser/Scripts/.onlineTaskListGoingToExipery_TaskDetails ]
+	then
+			echo "Aitel Digiate :: Online Task Going to Expiry List." > /home/cmsuser/.ONM_STATUS/ONLINE_TASK_GOING_TO_EXPIRE.REPORT
+			cat /home/cmsuser/Scripts/.onlineTaskListGoingToExipery_TaskDetails >> /home/cmsuser/.ONM_STATUS/ONLINE_TASK_GOING_TO_EXPIRE.REPORT
+			echo "[TO:adarsh.rs@6dtech.co.in]" >> /home/cmsuser/.ONM_STATUS/ONLINE_TASK_GOING_TO_EXPIRE.REPORT
+			rm -f /home/cmsuser/Scripts/.onlineTaskListGoingToExipery_TaskDetails
+	else
+			rm -f /home/cmsuser/Scripts/.onlineTaskListGoingToExipery_TaskDetails
+	fi
+fi
+
+#${conString} "${quotaExpiryForHTTPUserQuery}" | grep -v "${ignoreString}" | grep -v +- > /home/cmsuser/Scripts/.HTTPUseruotaExpiryDetils
+echo "HTTPUSER_QUOTA_EXPIRY_QUERY :: ${quotaExpiryForHTTPUserQuery}"
+if [ -f /home/cmsuser/Scripts/.HTTPUseruotaExpiryDetils ] && [ -s /home/cmsuser/Scripts/.HTTPUseruotaExpiryDetils ]
+then
+        echo "Aitel Digiate :: Quota Expired HTTP User List." > /home/cmsuser/.ONM_STATUS/CAMPAIGN_HTTP_QUOTA_EXPIRE_USER_LIST.REPORT
+        cat /home/cmsuser/Scripts/.HTTPUseruotaExpiryDetils >> /home/cmsuser/.ONM_STATUS/CAMPAIGN_HTTP_QUOTA_EXPIRE_USER_LIST.REPORT
+        echo "[TO:adarsh.rs@6dtech.co.in]" >> /home/cmsuser/.ONM_STATUS/CAMPAIGN_HTTP_QUOTA_EXPIRE_USER_LIST.REPORT
+        rm -f /home/cmsuser/Scripts/.HTTPUseruotaExpiryDetils
+else
+        rm -f /home/cmsuser/Scripts/.HTTPUseruotaExpiryDetils
+fi
+
+rm -f /home/cmsuser/Scripts/.monitorCMGNScheduling.RUNNING

@@ -1,0 +1,89 @@
+#!/bin/bash
+
+checkForSMSCDisconnection () {
+	statusId=${1}
+	echo "SELECT REPLACE(ERROR_DESC,'\`','')  FROM CMS.ALARM_DETAILS WHERE ALARM_STATUS_ID = ${statusId} AND CREATE_DATE > DATE_SUB(NOW(), INTERVAL 10 MINUTE) GROUP BY MODULE_ID"
+	alertList=$(${mysqlConnectionString} "SELECT REPLACE(ERROR_DESC,'\`','')  FROM CMS.ALARM_DETAILS WHERE ALARM_STATUS_ID = ${statusId} AND CREATE_DATE > DATE_SUB(NOW(), INTERVAL 30 MINUTE)  AND ERROR_DESC NOT LIKE '%My_inbox%' GROUP BY MODULE_ID")
+	if ((${#alertList} > 0))
+        then
+                echo "[ $(date '+%d-%m-%Y %H:%M:%S') ] ${appModuleName} :: STATUS - ${statusId} :: ALERT - ${alertList} | awk -F':' '{print $2}'"
+		if ((${statusId} == 1))
+		then
+			delimiter="GENERIC"
+			mailHeader="${appModuleName} : SMSC Connectivity Failure."
+			mailBodyLine="Below are the list of SMSC(s) which are unable to bind from Digimate: "
+		else
+			delimiter="MESSAGE"
+			mailHeader="${appModuleName} : SMSC Connectivity retained."
+			mailBodyLine="Connectivity retained for SMSC(s): "
+		fi
+		alertStatusFile="/home/cmsuser/.ONM_STATUS/$(/bin/hostname)_${appModuleName}_$(date '+%N').${delimiter}"
+		echo ${mailHeader} > ${alertStatusFile}
+        	echo ${mailBodyLine} >> ${alertStatusFile}
+	        echo ${alertList} | awk -F')' '{print $2}' >> ${alertStatusFile}
+		#echo "[TO:adarsh.rs@6dtech.co.in]" >> ${alertStatusFile}
+        fi
+}
+
+checkOnlineScheduleStatus () {
+	if (($(date '+%M' | sed 's/^0//g') < 10))
+	then
+		echo BREAK!!!
+		break
+	else
+		onlineUserTaskList=$(${mysqlConnectionString} "SELECT CONCAT_WS(',',TP.CREATED_BY, TP.TASK_ID, UD.FULLNAME) FROM CMS.TASK_PROFILE TP, CMS.USER_DETAILS UD WHERE TP.ONLINE = 1 AND TP.CREATED_BY = UD.USER_ID AND TP.TASK_ID NOT IN ('798','854','886','905','935','957','968','976','1012','799','855','1320','1384','1392');") 
+		onlineUserTaskList=$(echo "${onlineUserTaskList}" | grep -v CONCAT_WS)
+		echo "[ $(date '+%d-%m-%Y %H:%M:%S') ] ONLINE TASK LIST :: "${onlineUserTaskList}
+		${mysqlConnectionString} "SELECT TASK_ID FROM CMS.TASK_TABLE_MAPPING WHERE  CREATE_DATE > DATE_SUB(NOW(), INTERVAL 1 HOUR)" > .taskList
+		errorMessage=""
+		for onlineUserTaskToken in ${onlineUserTaskList}
+		do
+			onlineTaskFlag=false
+			onlineUserId=$(echo ${onlineUserTaskToken} | awk -F',' '{print $1}')
+			onlineTaskId=$(echo ${onlineUserTaskToken} | awk -F',' '{print $2}')
+			onlineUserName=$(echo ${onlineUserTaskToken} | awk -F',' '{print $3}')
+			if (($(grep ${onlineTaskId} .taskList | grep -v grep | wc -l) > 0))
+			then
+				onlineTaskFlag=true
+				echo "User ${onlineUserName} having the Task with Task_ID :: ${onlineTaskId}"
+			fi
+			if [[ $onlineTaskFlag = false ]]
+			then
+				errorMessage="${errorMessage} ${onlineUserName}"
+			fi	
+		done
+		if ((${#errorMessage} > 0))
+		then
+			find /home/cmsuser/Scripts/ -type f -name '.NORUNNINGCAMPAIGN' -mmin +59 -exec rm -f {} \;
+			if [ ! -f /home/cmsuser/Scripts/.NORUNNINGCAMPAIGN ]
+			then
+				alertStatusFile="/home/cmsuser/.ONM_STATUS/$(/bin/hostname)${appModuleName}_$(date '+%N').GENERIC"
+			    	echo "${appModuleName} : No Campaign Schedules." > ${alertStatusFile}
+				echo "Below are list of OnLine(API) users not having any campaign schdules on D!g!mate plateform past 1 hour interval." >> ${alertStatusFile}
+				echo "Below are list of OnLine(API) users not having any campaign schdules on D!g!mate plateform past 1 hour interval." > /home/cmsuser/Scripts/.NORUNNINGCAMPAIGN
+				echo "${errorMessage}" >> ${alertStatusFile}
+			fi
+		fi
+	fi
+}
+
+if [ -f /home/cmsuser/Scripts/.MONITORCMGNMGNRMODULES.PRSING ]
+then
+	exit 0
+fi
+
+touch /home/cmsuser/Scripts/.MONITORCMGNMGNRMODULES.PRSING
+appModuleName="AIRTEL-Digimate"
+mysqlConnectionString="mysql -ucmsuser -pcmsuser -h127.0.0.1 -P3306 -Ae "
+if (($(date '+%H' | sed 's/^0//g') == 7)) && (($(date '+%M' | sed 's/^0//g') < 15))
+then
+	echo "[ $(date '+%d-%m-%Y %H:%M:%S') ] TRUNCATE TABLE CMS.ALARM_DETAILS"
+        ${mysqlConnectionString} "TRUNCATE TABLE CMS.ALARM_DETAILS;"
+fi
+
+#checkOnlineScheduleStatus
+checkForSMSCDisconnection 1
+sleep 120
+checkForSMSCDisconnection 6
+${mysqlConnectionString} "TRUNCATE TABLE CMS.ALARM_DETAILS;"
+rm -f /home/cmsuser/Scripts/.MONITORCMGNMGNRMODULES.PRSING
